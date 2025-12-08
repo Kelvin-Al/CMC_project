@@ -1,3 +1,3 @@
 # CMC_project
 
-Please upload your code here.
+This is the repository for CMC project. Please upload your code here.
