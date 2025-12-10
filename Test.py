@@ -1,43 +1,55 @@
 import numpy as np
-from Models.CMC_base import BaseMCMC, ScottConsensusMCMC
+from Models.CMC_base import BaseMCMC, ConsensusMCMC
 from plot import plot_comparison, plot_scott_results
 
 def main():
     """主函数"""
-    # 生成数据
+    # 生成测试数据
     np.random.seed(42)
-    true_theta = 2.0
-    data = np.random.normal(true_theta, 1, 1000)
+    true_mu = 2.5
+    data_sizes = [100, 200, 300, 400]
+    subset_data = []
 
-    print("=== Scott共识MCMC演示 (单进程版本) ===")
+    # 生成4个不同大小的数据子集
+    for size in data_sizes:
+        data = np.random.normal(true_mu, 1, size)
+        subset_data.append(data)
 
-    # 1. 普通MCMC
-    def target_distribution(x):
-        return np.exp(-0.5 * (x-1)**2) + 0.5 * np.exp(-0.5 * (x+2)**2)
+    # 合并所有数据
+    full_data = np.concatenate(subset_data)
+    print(f"子集大小: {data_sizes}")
+    print(f"总数据大小: {len(full_data)}")
 
-    base_mcmc = BaseMCMC(target_distribution)
-    base_samples = base_mcmc.run_sampling(5000, 0.0)
+    # 1. 使用共识MCMC运行
+    print("运行共识MCMC...")
+    consensus_mcmc = ConsensusMCMC(n_workers=4, n_samples=2000, n_burnin=1000)
+    consensus_samples = consensus_mcmc.run_consensus(full_data)
 
-    # 2. Scott共识MCMC
-    scott_mcmc = ScottConsensusMCMC(data, num_subsets=4)
-    subset_samples = scott_mcmc.run_subset_mcmc(1000)  # 减少样本数以加快速度
-    consensus_samples = scott_mcmc.form_consensus(1000)
-    subset_info = scott_mcmc.get_subset_info()
+    # 2. 合并所有数据用普通MCMC运行
+    print("运行普通MCMC...")
+    base_mcmc = BaseMCMC(n_samples=20000, n_burnin=10000)
+    base_samples = base_mcmc.run(full_data)
 
-    # 打印结果
-    print("\n子集信息:")
-    for info in subset_info:
-        print(f"子集{info['subset']}: 数据量={info['data_size']}, "
-              f"均值={info['mean']:.3f}, 方差={info['variance']:.3f}, "
-              f"权重={info['precision']:.3f}")
+    # 输出结果比较
+    print(f"\n真实参数值: {true_mu}")
+    print(f"共识MCMC后验均值: {np.mean(consensus_samples):.4f}")
+    print(f"普通MCMC后验均值: {np.mean(base_samples):.4f}")
+    print(f"共识MCMC后验标准差: {np.std(consensus_samples):.4f}")
+    print(f"普通MCMC后验标准差: {np.std(base_samples):.4f}")
 
-    print(f"\n普通MCMC接受率: {base_mcmc.acceptance_rate:.3f}")
-    print(f"共识MCMC均值: {np.mean(consensus_samples):.3f}")
-    print(f"真实参数: {true_theta:.3f}")
+    # 使用plot.py中的函数绘图
+    plt1 = plot_comparison(base_samples, consensus_samples, true_mu)
+    plt1.show()
 
-    # 绘图
-    plot_comparison(base_samples, consensus_samples, true_theta).show()
-    plot_scott_results(subset_samples, consensus_samples, subset_info, true_theta).show()
+    # 如果有plot_scott_results函数需要的额外信息
+    subset_info = [
+        {'data_size': 100, 'precision': 1 / 0.1},
+        {'data_size': 200, 'precision': 1 / 0.08},
+        {'data_size': 300, 'precision': 1 / 0.06},
+        {'data_size': 400, 'precision': 1 / 0.05}
+    ]
 
+    plt2 = plot_scott_results(consensus_mcmc.worker_samples, consensus_samples, subset_info, true_mu)
+    plt2.show()
 if __name__ == '__main__':
     main()

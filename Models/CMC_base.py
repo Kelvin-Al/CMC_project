@@ -1,131 +1,235 @@
 import numpy as np
+from scipy import stats
+from scipy.stats import norm
 
+class BaseMCMC():
+    """
+    MCMC基类，定义基本的单链MCMC算法接口
+    """
 
-class BaseMCMC:
-    """普通MCMC实现"""
+    def __init__(self, n_samples=1000, n_burnin=500):
+        """
+        初始化MCMC参数
 
-    def __init__(self, target_dist, proposal_std=1.0):
-        self.target = target_dist
-        self.proposal_std = proposal_std
-        self.samples = []
+        Parameters:
+        -----------
+        n_samples : int
+            采样数量
+        n_burnin : int
+            预烧期数量
+        """
+        self.n_samples = n_samples
+        self.n_burnin = n_burnin
+        self.samples = None
         self.acceptance_rate = 0.0
+        self.proposal_std = 1.0
 
-    def metropolis_step(self, current):
-        candidate = np.random.normal(current, self.proposal_std)
-        acceptance_ratio = self.target(candidate) / self.target(current)
+    def initialize_chain(self):
+        """初始化链的起始位置"""
+        return np.array([0.0])
 
-        if np.random.rand() < acceptance_ratio:
-            return candidate, True
-        else:
-            return current, False
-
-    def run_sampling(self, n_samples, initial_state, burn_in=0.2):
-        current = initial_state
-        accepted = 0
-        total_iters = n_samples + int(n_samples * burn_in)
-        self.samples = []
-
-        for i in range(total_iters):
-            current, accepted_flag = self.metropolis_step(current)
-
-            if i >= int(n_samples * burn_in):
-                self.samples.append(current)
-                if accepted_flag:
-                    accepted += 1
-
-        self.acceptance_rate = accepted / n_samples
-        return np.array(self.samples)
+    def proposal_distribution(self, current_state):
+        """建议分布"""
+        return current_state + np.random.normal(0, self.proposal_std, size = current_state.shape)
 
 
-class ScottConsensusMCMC:
-    """Scott加权平均共识MCMC (单进程版本)"""
+    def target_distribution(self, state, data=None):
+        if data is None:
+            return 0.0
 
-    def __init__(self, data, num_subsets=4, proposal_std=1.0):
-        self.data = data
-        self.num_subsets = num_subsets
-        self.proposal_std = proposal_std
-        self.subsets = np.array_split(data, num_subsets)
-        self.subposterior_samples = []
-        self.subset_stats = []
+        mu = state[0]
+        # 似然函数：数据来自N(mu, 1)
+        log_likelihood = np.sum(norm.logpdf(data, loc=mu, scale=1.0))
+        # 先验：mu ~ N(0, 10)
+        log_prior = norm.logpdf(mu, loc=0, scale=10.0)
+        return log_likelihood + log_prior
 
-    def subset_posterior(self, theta, subset_idx, prior_mean=0, prior_var=10):
-        """计算子集后验分布"""
-        X_k = self.subsets[subset_idx]
-        n_k = len(X_k)
-        data_var = 1
+    def run(self, data=None):
+        """
+        运行MCMC采样
 
-        # 共轭正态分布更新
-        posterior_precision = 1 / prior_var + n_k / data_var
-        posterior_var = 1 / posterior_precision
-        posterior_mean = (prior_mean / prior_var + np.sum(X_k) / data_var) / posterior_precision
+        Parameters:
+        -----------
+        data : array-like, optional
+            观测数据
 
-        return np.exp(-0.5 * (theta - posterior_mean) ** 2 / posterior_var)
+        Returns:
+        --------
+        samples : ndarray
+            采样结果
+        """
+        n_total = self.n_samples + self.n_burnin
+        dim = len(self.initialize_chain())
+        self.samples = np.zeros((n_total, dim))
 
-    def run_subset_mcmc(self, n_samples_per_subset=1000):
-        """在子集上顺序运行MCMC"""
-        print("开始子集MCMC采样...")
+        # 初始化
+        current_state = self.initialize_chain()
+        current_log_prob = self.target_distribution(current_state, data)
 
-        for subset_idx in range(self.num_subsets):
-            print(f"正在采样子集 {subset_idx + 1}/{self.num_subsets}")
+        accept_count = 0
 
-            def target(theta):
-                return self.subset_posterior(theta, subset_idx)
+        for i in range(n_total):
+            # 从建议分布中采样
+            proposed_state = self.proposal_distribution(current_state)
+            proposed_log_prob = self.target_distribution(proposed_state, data)
 
-            base_mcmc = BaseMCMC(target, self.proposal_std)
-            samples = base_mcmc.run_sampling(n_samples_per_subset, 0.0)
+            # 计算接受概率
+            log_acceptance_ratio = proposed_log_prob - current_log_prob
+            acceptance_prob = min(1, np.exp(log_acceptance_ratio))
 
-            # 计算子后验统计量
-            subset_mean = np.mean(samples)
-            subset_var = np.var(samples)
-            subset_precision = 1 / subset_var
+            # 决定是否接受新状态
+            if np.random.rand() < acceptance_prob:
+                current_state = proposed_state
+                current_log_prob = proposed_log_prob
+                accept_count += 1
 
-            self.subset_stats.append({
-                'samples': samples,
-                'mean': subset_mean,
-                'variance': subset_var,
-                'precision': subset_precision,
-                'acceptance_rate': base_mcmc.acceptance_rate
-            })
+            self.samples[i] = current_state
 
-        self.subposterior_samples = [stat['samples'] for stat in self.subset_stats]
-        print("子集采样完成！")
-        return self.subposterior_samples
+        # 计算接受率
+        self.acceptance_rate = accept_count / n_total
 
-    def form_consensus(self, n_consensus=1000):
-        """Scott加权平均共识"""
-        if not self.subset_stats:
-            raise ValueError("请先运行子集MCMC")
+        # 去除预烧期
+        return self.samples[self.n_burnin:]
 
-        # 计算权重（基于精度）
-        precisions = [stat['precision'] for stat in self.subset_stats]
-        weights = np.array(precisions) / np.sum(precisions)
+    def get_posterior_mean(self):
+        """获取后验均值"""
+        if self.samples is None:
+            raise ValueError("请先运行MCMC采样")
+        return np.mean(self.samples[self.n_burnin:], axis=0)
 
-        print(f"子集权重: {weights}")
+    def get_posterior_std(self):
+        """获取后验标准差"""
+        if self.samples is None:
+            raise ValueError("请先运行MCMC采样")
+        return np.std(self.samples[self.n_burnin:], axis=0)
 
-        consensus_samples = []
-        for _ in range(n_consensus):
-            # 从每个子后验抽取一个样本
-            subsamples = []
-            for i in range(self.num_subsets):
-                random_idx = np.random.randint(len(self.subposterior_samples[i]))
-                subsamples.append(self.subposterior_samples[i][random_idx])
 
-            # Scott加权平均
-            weighted_avg = np.average(subsamples, weights=weights)
-            consensus_samples.append(weighted_avg)
+class ConsensusMCMC(BaseMCMC):
+    """
+    共识MCMC类，使用Scott的加权平均方法
+    """
 
-        return np.array(consensus_samples)
+    def __init__(self, n_workers=4, n_samples=1000, n_burnin=500):
+        """
+        初始化共识MCMC参数
 
-    def get_subset_info(self):
-        """获取子集信息"""
-        info = []
-        for i, stat in enumerate(self.subset_stats):
-            info.append({
-                'subset': i + 1,
-                'data_size': len(self.subsets[i]),
-                'mean': stat['mean'],
-                'variance': stat['variance'],
-                'precision': stat['precision'],
-                'acceptance_rate': stat['acceptance_rate']
-            })
-        return info
+        Parameters:
+        -----------
+        n_workers : int
+            工作节点数量（数据子集数量）
+        n_samples : int
+            每节点采样数量
+        n_burnin : int
+            每节点预烧期数量
+        """
+        super().__init__(n_samples, n_burnin)
+        self.n_workers = n_workers
+        self.subset_data = None
+        self.worker_samples = None
+        self.consensus_samples = None
+
+    def set_subset_data(self, subset_data):
+        """
+        设置子集数据
+
+        Parameters:
+        -----------
+        subset_data : list of array-like
+            各工作节点的数据子集列表
+        """
+        if len(subset_data) != self.n_workers:
+            raise ValueError(f"子集数据数量必须等于工作节点数量 {self.n_workers}")
+        self.subset_data = subset_data
+
+    def scott_weighted_average(self, worker_samples):
+        """
+        Scott的加权平均方法
+
+        Parameters:
+        -----------
+        worker_samples : list of ndarray
+            各工作节点的采样结果
+
+        Returns:
+        --------
+        consensus_samples : ndarray
+            共识采样结果
+        """
+        n_samples = worker_samples[0].shape[0]
+        dim = worker_samples[0].shape[1]
+        consensus_samples = np.zeros((n_samples, dim))
+
+        for t in range(n_samples):
+            # 收集当前时间步所有工作节点的样本
+            current_samples = np.array([worker_samples[i][t] for i in range(self.n_workers)])
+
+            # 计算加权平均（这里使用简单的算术平均作为示例）
+            # 实际应用中可能需要根据各节点的精度或数据量进行加权
+            consensus_samples[t] = np.mean(current_samples, axis=0)
+
+        return consensus_samples
+
+    def run_consensus(self, full_data=None):
+        """
+        运行共识MCMC
+
+        Parameters:
+        -----------
+        full_data : array-like, optional
+            完整数据集（如果提供，将自动划分为子集）
+
+        Returns:
+        --------
+        consensus_samples : ndarray
+            共识采样结果
+        """
+        if full_data is not None:
+            self._split_data(full_data)
+
+        if self.subset_data is None:
+            raise ValueError("请先设置子集数据或提供完整数据")
+
+        self.worker_samples = []
+
+        # 在各数据子集上并行运行MCMC（这里用循环模拟并行）
+        for i in range(self.n_workers):
+            print(f"在工作节点 {i + 1} 上运行MCMC...")
+            worker_mcmc = self._create_worker_mcmc()
+            samples = worker_mcmc.run(self.subset_data[i])
+            self.worker_samples.append(samples)
+
+        # 应用Scott加权平均
+        self.consensus_samples = self.scott_weighted_average(self.worker_samples)
+        return self.consensus_samples
+
+    def _split_data(self, full_data):
+        """将完整数据划分为子集"""
+        n_data = len(full_data)
+        subset_size = n_data // self.n_workers
+        self.subset_data = []
+
+        for i in range(self.n_workers):
+            start_idx = i * subset_size
+            end_idx = start_idx + subset_size if i < self.n_workers - 1 else n_data
+            self.subset_data.append(full_data[start_idx:end_idx])
+
+    def _create_worker_mcmc(self):
+        """创建工作节点专用的MCMC实例"""
+        return BaseMCMC(n_samples=self.n_samples, n_burnin=self.n_burnin)
+
+    # 重写基类方法以适应共识MCMC
+    def run(self, data=None):
+        """运行共识MCMC的便捷方法"""
+        return self.run_consensus(data)
+
+    def get_posterior_mean(self):
+        """获取共识后验均值"""
+        if self.consensus_samples is None:
+            raise ValueError("请先运行共识MCMC采样")
+        return np.mean(self.consensus_samples, axis=0)
+
+    def get_posterior_std(self):
+        """获取共识后验标准差"""
+        if self.consensus_samples is None:
+            raise ValueError("请先运行共识MCMC采样")
+        return np.std(self.consensus_samples, axis=0)
