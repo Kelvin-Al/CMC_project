@@ -1,3 +1,4 @@
+import numpy as np
 def shuffle_and_redistribute(data_groups):
     """合并数据，打乱后按照原始数据大小重新分组"""
     # 合并所有数据
@@ -25,3 +26,13 @@ def shuffle_and_redistribute(data_groups):
     print(f"重新分配后大小: {reshuffled_sizes}")
 
     return reshuffled_groups
+
+
+def generate_heterogeneous_data(n_groups, mean, std, size):
+    """生成3组具有异质性的测试数据"""
+
+    data_groups = []
+    for i in range(n_groups):
+        data_groups.append(np.random.normal(loc=mean[i], scale=std[i], size=size[i]))
+
+    return data_groups
