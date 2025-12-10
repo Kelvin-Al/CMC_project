@@ -1,9 +1,10 @@
 import numpy as np
 from scipy import stats
-from typing import Dict
+from typing import List, Dict, Any, Callable
 from Tools import *
+from Models.CMC_base import *
 
-
+np.random.seed(42)
 def calculate_posterior_heterogeneity(data_groups, prior_mean=0.0, prior_variance=1.0, likelihood_variance=None):
     """
     计算后验异质性，同时返回原始方法和Scott标准化方法的结果
@@ -195,8 +196,9 @@ def compare_heterogeneity_with_prior(data_groups: np.ndarray):
 
     # 生成数据
     np.random.seed(42)
-    mean = np.random.normal(loc = 100, scale = 0.4, size = 1000)
-    std = np.array([1]*100,dtype=np.float64)
+    mean = np.random.normal(loc = 100, scale = 0.3, size = 1000)
+    std = [10]+[1]*99
+    std = np.array(std,dtype=float)
     size = np.array([100]*100)
     data_A = generate_heterogeneous_data(100, mean, std, size)
     results_A = calculate_posterior_heterogeneity(
@@ -228,7 +230,109 @@ def compare_heterogeneity_with_prior(data_groups: np.ndarray):
     print(f"Q = {results_B['scott']['Q']:.4f}, p = {results_B['scott']['p_value']:.4f}")
 
 
+import numpy.typing as npt
+from scipy.stats import entropy
+
+def hierarchical_consensus_diagnostic(
+        group_data: List[npt.NDArray],
+        total_sample_size: int,
+        metric: str
+) -> Dict[str, Any]:
+    """
+    通过分层抽样比较整体共识与分层共识的差异来诊断异质性
+
+    参数:
+        group_data: 分组数据列表，每个元素是一个ndarray代表一组数据
+        total_sample_size: 分层抽样的总数据量
+        run_mcmc_on_data: 函数，接收数据返回后验分布样本
+        consensus_aggregator: 函数，接收多个后验分布样本返回共识后验
+        metrics: 使用的比较指标列表
+
+    返回:
+        诊断结果字典
+    """
+
+    def stratified_sampling(data_list: List[npt.NDArray], total_n: int) -> List[npt.NDArray]:
+        """按组大小比例进行分层抽样"""
+        # 计算每组应有的样本量（按比例分配）
+        group_sizes = [len(data) for data in data_list]
+        total_original_size = sum(group_sizes)
+        sample_sizes = [int(total_n * size / total_original_size) for size in group_sizes]
+
+        # 确保总样本量正确（处理整数舍入误差）
+        diff = total_n - sum(sample_sizes)
+        if diff > 0:
+            # 将剩余样本量分配给数据量较大的组
+            largest_groups = np.argsort(group_sizes)[-diff:]
+            for i in largest_groups:
+                sample_sizes[i] += 1
+
+        # 执行分层抽样
+        sampled_data = []
+        for i, data in enumerate(data_list):
+            if sample_sizes[i] > 0:
+                indices = np.random.choice(len(data), sample_sizes[i], replace=False)
+                sampled_data.append(data[indices])
+            else:
+                sampled_data.append(np.array([]))  # 空组
+
+        return sampled_data
+
+    def compute_metric(dist1: npt.NDArray, dist2: npt.NDArray, metric = metric) -> float:
+        """计算两个分布之间的差异度量"""
+        if metric == 'kl_divergence':
+            # 使用直方图近似计算KL散度
+            hist1, bins = np.histogram(dist1, bins=50, density=True)
+            hist2, _ = np.histogram(dist2, bins=bins, density=True)
+            # 避免除零错误
+            hist1 = np.clip(hist1, 1e-10, None)
+            hist2 = np.clip(hist2, 1e-10, None)
+            return entropy(hist1, hist2)
+
+        elif metric == 'wasserstein':
+            # 计算Wasserstein距离（推土机距离）
+            from scipy.stats import wasserstein_distance
+            return wasserstein_distance(dist1, dist2)
+
+        elif metric == 'mean_diff':
+            # 均值差异（标准化）
+            std_pooled = np.sqrt((np.var(dist1) + np.var(dist2)) / 2)
+            return np.abs(np.mean(dist1) - np.mean(dist2)) / (std_pooled + 1e-10)
+
+        elif metric == 'js_divergence':
+            # Jensen-Shannon散度（对称的KL变体）
+            hist1, bins = np.histogram(dist1, bins=50, density=True)
+            hist2, _ = np.histogram(dist2, bins=bins, density=True)
+            hist1 = np.clip(hist1, 1e-10, None)
+            hist2 = np.clip(hist2, 1e-10, None)
+            m = 0.5 * (hist1 + hist2)
+            return 0.5 * (entropy(hist1, m) + entropy(hist2, m))
+
+        else:
+            raise ValueError(f"不支持的度量标准: {metric}")
+
+    # 主逻辑开始
+    k = len(group_data)
+
+    # 1. 分层抽样
+    sampled_groups = stratified_sampling(group_data, total_sample_size)
+
+    # 2. 策略A: 整体共识（合并所有抽样数据）
+    combined_data = np.concatenate([data for data in sampled_groups if len(data) > 0])
+    base_mcmc = BaseMCMC(n_samples=2000, n_burnin=1000)
+    posterior_overall = base_mcmc.run(combined_data)
+
+    consensus_mcmc = ConsensusMCMC(n_workers=k, n_samples=2000, n_burnin=1000)
+    posterior_hierarchical = consensus_mcmc.run_consensus(group_data)
+
+    results = {}
+    results[metric] = compute_metric(posterior_overall, posterior_hierarchical)
+    return results
+
 
 # 运行测试
 if __name__ == "__main__":
-    compare_heterogeneity_with_prior(None)
+    #compare_heterogeneity_with_prior(None)
+    group_data = generate_heterogeneous_data(5, [100,100,100,100,110], [1,1,1,1,1], [2000,3000,4000,1000,500])
+    results = hierarchical_consensus_diagnostic(group_data,1050,'kl_divergence')
+    print(results)
