@@ -72,6 +72,56 @@ def normalize_subsets_by_swap_batch(data_list, swap_count):
     return swapped_data
 
 
+import numpy as np
+
+
+def balance_subsets_by_outlier_batch_migration(data_list, migration_ratio=0.1):
+    """
+    批量迁移离群点来平衡集合大小
+    迁移量 = 集合大小差异 × migration_ratio
+    """
+    # 确保是numpy数组
+    balanced_data = [np.array(sublist) for sublist in data_list]
+
+    # 计算每个集合的大小
+    sizes = np.array([len(s) for s in balanced_data])
+
+    # 找到最大和最小的集合
+    max_idx = np.argmax(sizes)
+    min_idx = np.argmin(sizes)
+
+    # 计算需要迁移的数量
+    size_diff = sizes[max_idx] - sizes[min_idx]
+    n_to_migrate = int(size_diff * migration_ratio)
+
+    if n_to_migrate <= 0:
+        return balanced_data
+
+    source_set = balanced_data[max_idx]
+    target_set = balanced_data[min_idx]
+
+    # 计算源集合中点的z-score（相对于源集合的分布）
+    mean_source = np.mean(source_set)
+    std_source = np.std(source_set)
+    if std_source == 0:
+        std_source = 1e-8
+
+    z_scores = np.abs((source_set - mean_source) / std_source)
+
+    # 找出z-score最大的n_to_migrate个点（离群点）
+    sorted_indices = np.argsort(z_scores)[-n_to_migrate:]  # 最大的n_to_migrate个
+
+    # 批量迁移
+    points_to_migrate = source_set[sorted_indices]
+
+    # 从源集合删除这些点
+    balanced_data[max_idx] = np.delete(source_set, sorted_indices)
+
+    # 添加到目标集合
+    balanced_data[min_idx] = np.append(target_set, points_to_migrate)
+
+    return balanced_data
+
 import matplotlib.pyplot as plt
 from Tools import *
 from Identification import calculate_posterior_heterogeneity
@@ -81,14 +131,18 @@ plt.rcParams['font.sans-serif'] = ['SimHei', 'Microsoft YaHei']
 plt.rcParams['axes.unicode_minus'] = False
 
 # 生成异质数据
-data_subsets = generate_heterogeneous_data(4, [10, 0, -10, 1], std=[1, 1, 1, 1], size=[1000, 1000, 1000, 100])
+data_subsets = generate_heterogeneous_data(4, [10, 0, -10, 1], std=[1, 1, 1, 1], size=[20000, 1000, 10000, 1000])
+
+
 
 print("原始数据:")
 for i, subset in enumerate(data_subsets):
     print(f"集合{i + 1}: 均值: {np.mean(subset):.2f}, 标准差: {np.std(subset):.2f}")
 
+
+
 # 记录Q值随交换次数的变化
-swap_iterations = list(range(0, 101, 1))  # 从0到100次交换，每5次记录一次
+swap_iterations = list(range(0, 20, 1))  # 从0到100次交换，每5次记录一次
 Q_values = []
 
 # 初始状态
@@ -102,7 +156,7 @@ current_data = [subset[:] for subset in data_subsets]  # 创建副本
 
 for iteration in swap_iterations[1:]:  # 跳过0次交换（已经是初始状态）
     # 每次交换10个点
-    result = normalize_subsets_by_swap_batch(current_data, swap_count=10)
+    result = balance_subsets_by_outlier_batch_migration(current_data, migration_ratio=0.2)
 
     # 更新当前数据为交换后的结果
     current_data = result
@@ -118,9 +172,9 @@ for iteration in swap_iterations[1:]:  # 跳过0次交换（已经是初始状�
 # 绘制Q值随交换次数的变化曲线
 plt.figure(figsize=(10, 6))
 plt.plot(swap_iterations, Q_values, 'b-o', linewidth=2, markersize=4)
-plt.xlabel('交换次数', fontsize=12)
+plt.xlabel('迁移次数', fontsize=12)
 plt.ylabel('异质性指标 Q', fontsize=12)
-plt.title('异质性指标 Q 随交换次数的变化', fontsize=14)
+plt.title('异质性指标 Q 随迁移次数的变化', fontsize=14)
 plt.grid(True, alpha=0.3)
 plt.axhline(y=initial_Q, color='r', linestyle='--', alpha=0.7, label=f'初始Q值: {initial_Q:.4f}')
 plt.legend()
@@ -138,3 +192,6 @@ print(f"最终Q值: {Q_values[-1]:.4f}")
 print(f"\n最终各集合统计:")
 for i, subset in enumerate(current_data):
     print(f"集合{i + 1}: 均值: {np.mean(subset):.2f}, 标准差: {np.std(subset):.2f}")
+
+
+
